@@ -8,7 +8,7 @@ const MAX_RETRIES = 2;
 export async function run(options) {
   const {
     provider, model, apiKey, baseUrl, maxTokens, temperature, system,
-    messages, tools, onStream, onToolCall, modelName,
+    messages, tools, onStream, onToolCall, onToolResult, modelName,
   } = options;
 
   const prov = createProvider(provider, { model: modelName || model, apiKey, baseUrl, maxTokens, temperature });
@@ -54,6 +54,7 @@ export async function run(options) {
       for (const tc of response.toolCalls) {
         if (onToolCall) await onToolCall(tc);
         const result = await executeToolCall(tc);
+        if (onToolResult) await onToolResult(tc, result);
         allMessages.push(result);
       }
       if (turnCount >= MAX_TURNS) break;

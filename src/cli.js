@@ -61,7 +61,7 @@ async function runPrompt(prompt, session, opts) {
     provider, model, apiKey, baseUrl,
     maxTokens: ac.maxTokens, temperature: ac.temperature, system: ac.system,
     messages: session.messages, tools,
-    onStream, onToolCall, modelName: model,
+    onStream, onToolCall, onToolResult: opts.onToolResult, modelName: model,
   });
 
   session.messages = result.messages;
@@ -292,15 +292,56 @@ async function runTUI(session, flags) {
     autoPrompt: true,
     onMessage: async (msg) => {
       tui.addMessage('user', msg);
-      const streamUpdater = tui.startStream('assistant');
+      let streamUpdater = tui.startStream('assistant');
+      const seenTools = new Set();
       try {
         const result = await runPrompt(msg, session, {
           ...flags, tui: true,
           onStream: (chunk) => { streamUpdater(chunk); },
-          onToolCall: async () => {},
+          onToolCall: async (tc) => {
+            tui.endStream();
+            const name = tc.function?.name || 'tool';
+            let brief = '';
+            try {
+              const a = typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function?.arguments || {};
+              brief = a.command || a.path || a.description || a.url || '';
+            } catch {}
+            tui.addOutput(`→ ${name}${brief ? ': ' + brief : ''}`);
+            streamUpdater = tui.startStream('assistant');
+          },
+          onToolResult: async (tc, result) => {
+            const id = tc.id || tc.function?.name || 'tool';
+            if (seenTools.has(id)) return;
+            seenTools.add(id);
+            let brief = '';
+            if (typeof result.content === 'string') {
+              brief = result.content.replace(/\s+/g, ' ').trim();
+              if (brief.length > 80) brief = brief.slice(0, 80) + '...';
+            }
+            if (result.isError) {
+              tui.addOutput(`  ⎋ Error: ${brief || 'tool failed'}`);
+            } else if (brief) {
+              tui.addOutput(`  ↳ ${brief}`);
+            }
+          },
         });
-        const lastMsg = result.messages.filter(m => m.role === 'assistant').pop();
-        tui.endStream(lastMsg?.content);
+        tui.endStream();
+        // Show any tool results that weren't streamed
+        for (const m of result.messages) {
+          if (m.role === 'tool') {
+            const id = m.tool_call_id || 'tool';
+            if (!seenTools.has(id)) {
+              seenTools.add(id);
+              let brief = '';
+              if (typeof m.content === 'string') {
+                brief = m.content.replace(/\s+/g, ' ').trim();
+                if (brief.length > 80) brief = brief.slice(0, 80) + '...';
+              }
+              if (m.isError) tui.addOutput(`  ⎋ Error: ${brief || 'tool failed'}`);
+              else if (brief) tui.addOutput(`  ↳ ${brief}`);
+            }
+          }
+        }
       } catch (e) {
         tui.endStream();
         tui.addChatLine(Rr + 'Error: ' + e.message + R);
