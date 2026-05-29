@@ -4,7 +4,7 @@
   "description": "32-bit ARM compatible OpenCode AI coding agent — full CLI, all providers, tools, sessions, web UI, MCP, plugins",
   "license": "MIT",
   "bin": {
-    "opencode": "bin/opencode.js"
+    "opencode": "bin/opencode"
   },
   "type": "module",
   "engines": {
@@ -12,13 +12,10 @@
   },
   "os": ["darwin", "linux", "win32", "android"],
   "cpu": ["arm", "arm64", "x64", "ia32"],
-  "files": ["bin", "src", "install.sh", "README.md", "LICENSE"],
+  "files": ["bin", "src", "install.sh", "LICENSE"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tundefund0-gif/opencode-32.git"
-  },
-  "scripts": {
-    "postinstall": "node -e \"try{fs.chmodSync(require('path').join(__dirname,'bin/opencode.js'),0o755)}catch(e){}\""
   },
   "keywords": ["opencode", "ai", "coding-agent", "cli", "arm32", "termux", "armv7"]
 }
