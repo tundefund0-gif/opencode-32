@@ -10,7 +10,7 @@
   "engines": {
     "node": ">=18"
   },
-  "os": ["darwin", "linux", "win32"],
+  "os": ["darwin", "linux", "win32", "android"],
   "cpu": ["arm", "arm64", "x64", "ia32"],
   "files": ["bin", "src", "install.sh", "README.md", "LICENSE"],
   "repository": {
