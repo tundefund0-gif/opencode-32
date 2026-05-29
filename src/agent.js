@@ -16,10 +16,10 @@ export async function run(options) {
   let allMessages = [{ role: 'system', content: getSystemPrompt(system) }, ...messages];
   let turnCount = 0;
   let emptyRetries = 0;
+  let response;
 
   while (turnCount < MAX_TURNS) {
     turnCount++;
-    let response;
 
     for (let retry = 0; retry < MAX_RETRIES; retry++) {
       try {

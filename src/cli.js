@@ -48,18 +48,15 @@ async function runPrompt(prompt, session, opts) {
   const hints = loadProjectHints(session.cwd);
   session.messages.push({ role: 'user', content: prompt });
 
-  const onStream = opts.tui
-    ? (chunk) => { if (chunk) process.stdout.write(chunk); }
-    : undefined;
-
-  const onToolCall = opts.tui
-    ? async (tc) => {
-        const name = tc.function?.name || 'tool';
-        let desc = '';
-        try { const a = JSON.parse(tc.function?.arguments || '{}'); desc = a.description || a.command || a.path || ''; } catch {}
-        process.stdout.write(`\n${D}⎿  ${name}${desc ? ': ' + desc : ''}${R}\n`);
-      }
-    : undefined;
+  // In TUI mode, don't write to stdout (corrupts TUI display)
+  const isTUI = !!opts.tui;
+  const onStream = isTUI ? undefined : (chunk) => { if (chunk) process.stdout.write(chunk); };
+  const onToolCall = isTUI ? undefined : async (tc) => {
+    const name = tc.function?.name || 'tool';
+    let desc = '';
+    try { const a = JSON.parse(tc.function?.arguments || '{}'); desc = a.description || a.command || a.path || ''; } catch {}
+    process.stdout.write(`\n${D}⎿  ${name}${desc ? ': ' + desc : ''}${R}\n`);
+  };
 
   const result = await run({
     provider, model, apiKey, baseUrl,
