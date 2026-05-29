@@ -1,46 +1,41 @@
 import { OpenAIProvider } from './openai.js';
 import { AnthropicProvider } from './anthropic.js';
 import { GoogleProvider } from './google.js';
-import { GroqProvider } from './groq.js';
-import { BedrockProvider } from './bedrock.js';
-import { OllamaProvider } from './ollama.js';
-import { LMStudioProvider } from './lmstudio.js';
-import { OpenCodeProvider } from './opencode.js';
-import { OpenRouterProvider } from './openrouter.js';
 
-const DEFAULTS = {
-  openai: { cls: OpenAIProvider, needsKey: true },
-  anthropic: { cls: AnthropicProvider, needsKey: true },
-  google: { cls: GoogleProvider, needsKey: true },
-  groq: { cls: GroqProvider, needsKey: true },
-  bedrock: { cls: BedrockProvider, needsKey: true },
-  ollama: { cls: OllamaProvider, needsKey: false },
-  lmstudio: { cls: LMStudioProvider, needsKey: false },
-  opencode: { cls: OpenCodeProvider, needsKey: true },
-  openrouter: { cls: OpenRouterProvider, needsKey: true },
+const BASE_URLS = {
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  google: 'https://generativelanguage.googleapis.com/v1beta',
+  groq: 'https://api.groq.com/openai/v1',
+  ollama: 'http://localhost:11434/v1',
+  lmstudio: 'http://localhost:1234/v1',
+  opencode: 'https://opencode.ai/zen/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+  deepseek: 'https://api.deepseek.com/v1',
+  together: 'https://api.together.xyz/v1',
+  fireworks: 'https://api.fireworks.ai/inference/v1',
+  azure: null,
 };
 
-export function getProvider(providerName, modelName, config) {
-  const def = DEFAULTS[providerName];
-  if (!def) throw new Error(`Unknown provider: ${providerName}. Supported: ${Object.keys(DEFAULTS).join(', ')}`);
-  const providerConfig = {
-    ...config,
-    model: modelName,
-    baseUrl: config.baseUrl || undefined,
-    apiKey: config.apiKey || undefined,
-    maxTokens: config.maxTokens || 4096,
-    temperature: config.temperature ?? 0.3,
-  };
-  return new def.cls(providerConfig);
-}
+export function createProvider(provider, config) {
+  const baseUrl = config.baseUrl || BASE_URLS[provider];
 
-export function requiresKey(providerName) {
-  return DEFAULTS[providerName]?.needsKey !== false;
+  if (provider === 'anthropic') {
+    return new AnthropicProvider({ ...config, baseUrl });
+  }
+  if (provider === 'google') {
+    return new GoogleProvider({ ...config, baseUrl });
+  }
+
+  const headers = {};
+  if (provider === 'openrouter') {
+    headers['HTTP-Referer'] = 'https://opencode-32.local';
+    headers['X-Title'] = 'opencode-32';
+  }
+
+  return new OpenAIProvider({ ...config, baseUrl, headers });
 }
 
 export function listProviders() {
-  return Object.entries(DEFAULTS).map(([name, def]) => ({
-    name,
-    needsKey: def.needsKey,
-  }));
+  return Object.keys(BASE_URLS);
 }

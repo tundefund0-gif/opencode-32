@@ -1,7 +1,7 @@
 {
   "name": "opencode-32",
   "version": "1.0.0",
-  "description": "32-bit ARM compatible OpenCode AI coding agent — full CLI, all providers, tools, sessions, web UI, MCP, plugins",
+  "description": "32-bit ARM compatible OpenCode AI coding agent — TUI + CLI, all providers, tools, sessions, web server, MCP",
   "license": "MIT",
   "bin": {
     "opencode": "bin/opencode"
@@ -17,5 +17,5 @@
     "type": "git",
     "url": "git+https://github.com/tundefund0-gif/opencode-32.git"
   },
-  "keywords": ["opencode", "ai", "coding-agent", "cli", "arm32", "termux", "armv7"]
+  "keywords": ["opencode", "ai", "coding-agent", "tui", "cli", "arm32", "termux", "armv7"]
 }

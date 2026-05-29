@@ -1,39 +1,48 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { homedir } from 'os';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
+import { homedir, platform } from 'os';
 import { join, resolve } from 'path';
-import { execSync } from 'child_process';
 
-const CONFIG_DIR = process.env.OPENCODE_CONFIG_DIR || join(homedir(), '.config', 'opencode');
-const CONFIG_PATH = join(CONFIG_DIR, 'opencode.json');
-const DATA_DIR = join(CONFIG_DIR, 'data');
+export const CONFIG_DIR = process.env.XDG_CONFIG_HOME
+  ? join(process.env.XDG_CONFIG_HOME, 'opencode')
+  : join(homedir(), '.config', 'opencode');
+export const DATA_DIR = process.env.XDG_DATA_HOME
+  ? join(process.env.XDG_DATA_HOME, 'opencode')
+  : join(homedir(), '.local', 'share', 'opencode');
+export const SESSIONS_DIR = join(DATA_DIR, 'sessions');
+export const CONFIG_PATH = join(CONFIG_DIR, 'opencode.json');
+export const CONFIG_JSONC_PATH = join(CONFIG_DIR, 'opencode.jsonc');
 
-export function ensureConfigDir() {
-  for (const d of [CONFIG_DIR, DATA_DIR]) {
+export function ensureDirs() {
+  for (const d of [CONFIG_DIR, DATA_DIR, SESSIONS_DIR]) {
     if (!existsSync(d)) mkdirSync(d, { recursive: true });
   }
 }
 
 export function loadConfig() {
-  if (!existsSync(CONFIG_PATH)) return {};
-  try { return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')); }
-  catch { return {}; }
+  const paths = [process.env.OPENCODE_CONFIG_PATH, CONFIG_PATH, CONFIG_JSONC_PATH].filter(Boolean);
+  for (const p of paths) {
+    if (existsSync(p)) {
+      try {
+        let raw = readFileSync(p, 'utf-8');
+        if (p.endsWith('.jsonc')) raw = raw.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+        return JSON.parse(raw);
+      } catch {}
+    }
+  }
+  return {};
 }
 
 export function saveConfig(config) {
-  ensureConfigDir();
+  ensureDirs();
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
-export function getConfigDir() { return CONFIG_DIR; }
-export function getDataDir() { return DATA_DIR; }
-export function getConfigPath() { return CONFIG_PATH; }
-
 export function getApiKey(provider) {
   const envKey = `OPENCODE_${provider.toUpperCase()}_API_KEY`;
-  const fromEnv = process.env[envKey] || process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY;
-  if (fromEnv) return fromEnv;
+  if (process.env[envKey]) return process.env[envKey];
+  if (process.env.OPENCODE_API_KEY) return process.env.OPENCODE_API_KEY;
   const cfg = loadConfig();
-  return cfg.apiKeys?.[provider] || cfg.apiKey || null;
+  return cfg.apiKeys?.[provider] || null;
 }
 
 export function setApiKey(provider, key) {
@@ -43,85 +52,55 @@ export function setApiKey(provider, key) {
   saveConfig(cfg);
 }
 
-export function getModel() {
-  return process.env.OPENCODE_MODEL || loadConfig().model || 'opencode/big-pickle';
-}
-
-export function setModel(model) {
+export function getProviders() {
   const cfg = loadConfig();
-  cfg.model = model;
-  saveConfig(cfg);
-}
+  if (cfg.providers) return cfg.providers;
 
-export function getProvider() {
-  const raw = getModel();
-  const slash = raw.indexOf('/');
-  if (slash > 0) return raw.substring(0, slash).toLowerCase();
-  const cfg = loadConfig();
-  return cfg.provider || 'opencode';
-}
-
-export function getModelName() {
-  const raw = getModel();
-  const slash = raw.indexOf('/');
-  if (slash > 0) return raw.substring(slash + 1);
-  return raw;
-}
-
-export function getBaseUrl(provider) {
-  const envUrl = process.env[`OPENCODE_${provider.toUpperCase()}_BASE_URL`];
-  if (envUrl) return envUrl;
-  switch (provider) {
-    case 'openai': return 'https://api.openai.com/v1';
-    case 'anthropic': return 'https://api.anthropic.com/v1';
-    case 'google': return 'https://generativelanguage.googleapis.com/v1beta';
-    case 'groq': return 'https://api.groq.com/openai/v1';
-    case 'bedrock': return null; // Uses AWS SDK
-    case 'ollama': return 'http://localhost:11434/v1';
-    case 'lmstudio': return 'http://localhost:1234/v1';
-    case 'opencode': return 'https://opencode.ai/zen/v1';
-    case 'openrouter': return 'https://openrouter.ai/api/v1';
-    default: return loadConfig().baseUrl || 'https://api.openai.com/v1';
+  const model = cfg.model || process.env.OPENCODE_MODEL;
+  if (model && model.includes('/')) {
+    const [prov, mdl] = model.split('/');
+    return { [prov]: { model: mdl, apiKey: getApiKey(prov), maxTokens: cfg.maxTokens || 4096 } };
   }
+  return { opencode: { model: 'big-pickle', apiKey: getApiKey('opencode'), maxTokens: 4096 } };
 }
 
-export function getMaxTokens() {
-  return parseInt(process.env.OPENCODE_MAX_TOKENS || loadConfig().maxTokens || '4096', 10);
+export function getAgents() {
+  const cfg = loadConfig();
+  return cfg.agents || {
+    primary: { model: process.env.OPENCODE_MODEL || 'opencode/big-pickle', maxTokens: 4096, system: '' },
+    task: { model: process.env.OPENCODE_MODEL || 'opencode/big-pickle', maxTokens: 4096 },
+    title: { model: process.env.OPENCODE_MODEL || 'opencode/big-pickle', maxTokens: 80 },
+  };
 }
 
-export function getTemperature() {
-  return parseFloat(process.env.OPENCODE_TEMPERATURE || loadConfig().temperature || '0.3');
+export function getAgentConfig(name = 'primary') {
+  const agents = getAgents();
+  const agent = agents[name] || agents.primary || {};
+  const model = agent.model || process.env.OPENCODE_MODEL || 'opencode/big-pickle';
+  const [provider, ...rest] = model.split('/');
+  const modelName = rest.join('/') || model;
+  const provConfig = getProviders()[provider] || {};
+  return {
+    provider,
+    model: modelName,
+    apiKey: agent.apiKey || provConfig.apiKey || getApiKey(provider),
+    baseUrl: agent.baseUrl || provConfig.baseUrl || process.env[`OPENCODE_${provider.toUpperCase()}_BASE_URL`],
+    maxTokens: agent.maxTokens || provConfig.maxTokens || parseInt(process.env.OPENCODE_MAX_TOKENS || '4096', 10),
+    temperature: agent.temperature ?? parseFloat(process.env.OPENCODE_TEMPERATURE ?? '0.3'),
+    system: agent.system || '',
+    reasoningEffort: agent.reasoningEffort || '',
+  };
 }
 
-export function getSystemPrompt(instructions) {
-  let p = `You are OpenCode, an AI coding agent running on the user's device. You have full access to files and the shell.
+export function getSystemPrompt(custom) {
+  let p = `You are OpenCode, an AI coding agent. You have full access to files and the shell.
 
-CRITICAL RULES:
-- Never repeat yourself. Vary every response.
-- Be concise unless asked for detail.
-- Use tools to read, write, edit files and run shell commands.
-- For bash commands, always include a clear description.
-- Do the task and stop — no unnecessary follow-up.
-
-Available tools: read, write, edit, bash, glob, grep, ls, append, move, delete, search`;
-  if (instructions) p += `\n\nProject Instructions:\n${instructions}`;
+Rules:
+- Be concise. Do the task and stop.
+- Use tools to read, write, edit files and run commands.
+- For bash, always include a clear description.`;
+  if (custom) p += '\n\n' + custom;
   return p;
-}
-
-let _ollamaCheck = { result: null, time: 0 };
-export function isOllamaRunning() {
-  if (_ollamaCheck.result !== null && Date.now() - _ollamaCheck.time < 15000) return _ollamaCheck.result;
-  try {
-    execSync('curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 || wget -q http://localhost:11434/api/tags -O /dev/null 2>&1', { timeout: 2000 });
-    _ollamaCheck = { result: true, time: Date.now() };
-  } catch { _ollamaCheck = { result: false, time: Date.now() }; }
-  return _ollamaCheck.result;
-}
-
-const VISION_MODELS = ['gpt-4o', 'gpt-4.1', 'gpt-5.5', 'gpt-5.4', 'gemini-2.5', 'claude-3', 'claude-4'];
-export function supportsVision() {
-  const m = getModelName();
-  return VISION_MODELS.some(v => m.includes(v)) || loadConfig().vision === true;
 }
 
 export function estimateTokens(text) {
@@ -134,22 +113,20 @@ export function estimateTokens(text) {
   return Math.ceil(t) + 3;
 }
 
-export function getTokenCachePath() {
-  return join(DATA_DIR, 'tokens.json');
+const VISION_MODELS = ['claude-3', 'claude-4', 'gpt-4o', 'gpt-4.1', 'gpt-5', 'gemini-2.5', 'gemini-2.0'];
+export function supportsVision(m) {
+  return VISION_MODELS.some(v => (m || '').includes(v));
 }
 
 export function getTokenCache() {
-  const p = getTokenCachePath();
+  const p = join(DATA_DIR, 'tokens.json');
   if (!existsSync(p)) return { totalInput: 0, totalOutput: 0, totalCost: 0 };
-  try { return JSON.parse(readFileSync(p, 'utf-8')); }
-  catch { return { totalInput: 0, totalOutput: 0, totalCost: 0 }; }
+  try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return { totalInput: 0, totalOutput: 0, totalCost: 0 }; }
 }
 
 export function updateTokenCache(input, output, cost) {
   const c = getTokenCache();
-  c.totalInput += input;
-  c.totalOutput += output;
-  c.totalCost += cost;
-  ensureConfigDir();
-  writeFileSync(getTokenCachePath(), JSON.stringify(c));
+  c.totalInput += input; c.totalOutput += output; c.totalCost += cost;
+  ensureDirs();
+  writeFileSync(join(DATA_DIR, 'tokens.json'), JSON.stringify(c));
 }

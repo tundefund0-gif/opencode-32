@@ -1,113 +1,88 @@
-import { BaseProvider } from './base.js';
+export class AnthropicProvider {
+  constructor(config) {
+    this.baseUrl = config.baseUrl || 'https://api.anthropic.com/v1';
+    this.apiKey = config.apiKey || '';
+    this.model = config.model || 'claude-3-5-sonnet-20241022';
+    this.maxTokens = config.maxTokens || 4096;
+    this.temperature = config.temperature ?? 0.3;
+  }
 
-export class AnthropicProvider extends BaseProvider {
   async chat(messages, tools, onStream) {
-    const url = `${this.config.baseUrl}/messages`;
-    const model = this.config.model;
     const system = [];
     const msgs = [];
     for (const m of messages) {
       if (m.role === 'system') { system.push(m.content); continue; }
       const role = m.role === 'assistant' ? 'assistant' : 'user';
       const content = [];
-      if (typeof m.content === 'string') {
-        content.push({ type: 'text', text: m.content });
-      } else if (Array.isArray(m.content)) {
-        for (const c of m.content) {
-          if (typeof c === 'string') content.push({ type: 'text', text: c });
-          else content.push(c);
-        }
-      }
+      if (typeof m.content === 'string') content.push({ type: 'text', text: m.content });
       if (m.tool_calls) {
         for (const tc of m.tool_calls) {
-          content.push({
-            type: 'tool_use',
-            id: tc.id,
-            name: tc.function?.name,
-            input: JSON.parse(tc.function?.arguments || '{}'),
-          });
+          content.push({ type: 'tool_use', id: tc.id, name: tc.function?.name, input: JSON.parse(tc.function?.arguments || '{}') });
         }
+      }
+      if (m.role === 'tool') {
+        msgs.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content }] });
+        continue;
       }
       msgs.push({ role, content });
     }
-    const lastMsg = msgs[msgs.length - 1];
-    if (lastMsg?.role === 'tool_result') throw new Error('Anthropic does not support tool_result role');
-    const body = { model, max_tokens: this.config.maxTokens || 4096, messages: msgs };
+
+    const body = { model: this.model, max_tokens: this.maxTokens, messages: msgs };
     if (system.length) body.system = system.join('\n');
     if (tools?.length) {
-      body.tools = tools.map(t => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.parameters,
-      }));
+      body.tools = tools.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }));
     }
     if (onStream) body.stream = true;
 
-    const res = await fetch(url, {
+    const res = await fetch(this.baseUrl + '/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.apiKey,
-        'anthropic-version': '2023-06-01',
-        ...(this.config.headers || {}),
-      },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify(body),
     });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      throw new Error(`Anthropic API error ${res.status}: ${err.substring(0, 300)}`);
+      throw new Error(`Anthropic error ${res.status}: ${err.slice(0, 300)}`);
     }
-    if (onStream) return this._handleStream(res, onStream);
+    if (onStream) return this._stream(res, onStream);
     const data = await res.json();
     return {
-      content: data.content?.[0]?.text || '',
+      content: data.content?.find(c => c.type === 'text')?.text || '',
       toolCalls: (data.content?.filter(c => c.type === 'tool_use') || []).map(tc => ({
-        id: tc.id,
-        type: 'function',
-        function: { name: tc.name, arguments: JSON.stringify(tc.input) },
+        id: tc.id, type: 'function', function: { name: tc.name, arguments: JSON.stringify(tc.input) },
       })),
       finishReason: data.stop_reason,
       usage: data.usage,
     };
   }
 
-  async _handleStream(res, onStream) {
+  async _stream(res, onStream) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buf = '';
     let content = '';
     let toolCalls = [];
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
-        const jsonStr = line.slice(6);
         try {
-          const data = JSON.parse(jsonStr);
-          if (data.type === 'content_block_delta' && data.delta?.text) {
-            content += data.delta.text;
-            onStream({ content: data.delta.text, done: false });
+          const d = JSON.parse(line.slice(6));
+          if (d.type === 'content_block_delta' && d.delta?.text) { content += d.delta.text; onStream(d.delta.text); }
+          if (d.type === 'content_block_start' && d.content_block?.type === 'tool_use') {
+            toolCalls.push({ index: d.index, id: d.content_block.id, type: 'function', function: { name: d.content_block.name, arguments: '' } });
           }
-          if (data.type === 'content_block_start' && data.content_block?.type === 'tool_use') {
-            toolCalls.push({
-              index: data.index,
-              id: data.content_block.id,
-              type: 'function',
-              function: { name: data.content_block.name, arguments: '' },
-            });
-          }
-          if (data.type === 'content_block_delta' && data.delta?.partial_json) {
-            const tc = toolCalls.find(t => t.index === data.index);
-            if (tc) tc.function.arguments += data.delta.partial_json;
+          if (d.type === 'content_block_delta' && d.delta?.partial_json) {
+            const tc = toolCalls.find(t => t.index === d.index);
+            if (tc) tc.function.arguments += d.delta.partial_json;
           }
         } catch {}
       }
     }
-    onStream({ content: '', done: true });
+    onStream(null);
     return {
       content,
       toolCalls: toolCalls.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.function.name, arguments: tc.function.arguments } })),

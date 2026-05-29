@@ -1,59 +1,56 @@
 import { existsSync } from 'fs';
 import { resolve } from 'path';
-import { readFileSync } from 'fs';
-import { Session, deleteSession, loadProjectInstructions } from './session.js';
-import { getApiKey, setApiKey, getModel, setModel, getProvider, getBaseUrl, getTokenCache, ensureConfigDir, getConfigPath, getConfigDir, loadConfig } from './config.js';
+import { Session, deleteSession, loadProjectHints } from './session.js';
+import { getAgentConfig, getApiKey, setApiKey, getTokenCache, ensureDirs, loadConfig, saveConfig, DATA_DIR } from './config.js';
 import { tools } from './tools.js';
-import { runAgentLoop } from './agent.js';
+import { run } from './agent.js';
 
 const BOLD = '\x1b[1m', DIM = '\x1b[2m', GREEN = '\x1b[32m', CYAN = '\x1b[36m', YELLOW = '\x1b[33m', RED = '\x1b[31m', RESET = '\x1b[0m';
 
-function printHelp() {
-  const help = `OpenCode-32 — AI coding agent for 32-bit ARM
-
-${BOLD}USAGE${RESET}
-  opencode <command> [options]
-
-${BOLD}COMMANDS${RESET}
-  <prompt>               Quick task (single-shot)
-  exec <prompt>          Execute task with agent loop
-  resume [id]            Resume a session
-  fork [id]              Fork a session
-  web                    Start web UI
-  mcp                    Start MCP stdio server
-  auth <provider>        Set API key for a provider
-  model <name>           Set model (provider/name)
-  doctor                 Run diagnostics
-  list                   List sessions
-  delete <id>            Delete a session
-  cleanup                Remove empty sessions
-  stats                  Show token usage stats
-
-${BOLD}OPTIONS${RESET}
-  --model <name>         Model to use (e.g. openai/gpt-4o)
-  --provider <name>      Provider (openai, anthropic, google, groq, bedrock, ollama, lmstudio, opencode, openrouter)
-  --api-key <key>        API key
-  --base-url <url>       Custom base URL
-  -y                     Auto-confirm dangerous operations
-  --help, -h             Show this help
-
-${BOLD}ENVIRONMENT${RESET}
-  OPENCODE_API_KEY, OPENCODE_<PROVIDER>_API_KEY
-  OPENCODE_MODEL         Model string (e.g. openai/gpt-4o)
-  OPENCODE_<PROVIDER>_BASE_URL
-  OPENCODE_CONFIG_DIR    Config directory (default ~/.config/opencode)
-  OPENCODE_MAX_TOKENS    Max tokens per response (default 4096)
-  OPENCODE_TEMPERATURE   Temperature (default 0.3)
-
-${BOLD}EXAMPLES${RESET}
-  opencode "list files in current dir"
-  opencode exec "create a todo app" --model openai/gpt-4o
-  opencode resume
-  opencode auth openai sk-proj-xxx
-  opencode web
-  opencode doctor
-  opencode stats`;
-  console.log(help);
+function help() {
+  console.log(`${BOLD}OpenCode-32${RESET} ${DIM}v1.0.0${RESET}`);
+  console.log('');
+  console.log(`${BOLD}USAGE${RESET}`);
+  console.log('  opencode                      Start interactive TUI');
+  console.log('  opencode [options] <prompt>    Run a prompt and exit');
+  console.log('  opencode <command> [args]      Run a command');
+  console.log('');
+  console.log(`${BOLD}OPTIONS${RESET}`);
+  console.log('  -p, --prompt <text>       Run a prompt (non-interactive)');
+  console.log('  -c, --continue            Continue most recent session');
+  console.log('  -m, --model <model>       Model to use (provider/model)');
+  console.log('  --agent <name>            Agent to use (from config)');
+  console.log('  -d                        Debug mode');
+  console.log('  --verbose                 Verbose logging');
+  console.log('  -q                        Quiet (no spinner)');
+  console.log('  -f, --format <fmt>        Output format (text, json)');
+  console.log('  --allowedTools <list>     Comma-separated allowed tools');
+  console.log('  --excludedTools <list>    Comma-separated excluded tools');
+  console.log('  -cwd <path>               Working directory');
+  console.log('  -h, --help                Show help');
+  console.log('');
+  console.log(`${BOLD}COMMANDS${RESET}`);
+  console.log('  run       <prompt>        Run a prompt non-interactively');
+  console.log('  continue  [id]            Continue a session');
+  console.log('  auth      <provider> [key] Manage API keys');
+  console.log('  models                    List available models');
+  console.log('  serve     [--port] [--hostname] Start HTTP server');
+  console.log('  web                       Start web UI');
+  console.log('  mcp                       Start MCP stdio server');
+  console.log('  agent     create          Create a custom agent');
+  console.log('  stats                     Show token usage');
+  console.log('  sessions                  List sessions');
+  console.log('  session   delete <id>     Delete a session');
+  console.log('  doctor                    Run diagnostics');
+  console.log('  version                   Show version');
+  console.log('');
+  console.log(`${BOLD}ENVIRONMENT${RESET}`);
+  console.log('  OPENCODE_MODEL, OPENCODE_<PROVIDER>_API_KEY');
+  console.log('  OPENCODE_<PROVIDER>_BASE_URL');
+  console.log('  XDG_CONFIG_HOME, OPENCODE_CONFIG_PATH');
+  console.log('');
+  console.log(`${BOLD}CONFIG${RESET}`);
+  console.log('  ~/.config/opencode/opencode.json');
 }
 
 function printMarkdown(text) {
@@ -63,220 +60,302 @@ function printMarkdown(text) {
   for (const line of lines) {
     if (line.startsWith('```')) { inCode = !inCode; console.log(DIM + line + RESET); continue; }
     if (inCode) { console.log(DIM + '  ' + line + RESET); continue; }
-    const rendered = line
-      .replace(/\*\*(.+?)\*\*/g, `${BOLD}$1${RESET}`)
-      .replace(/`(.+?)`/g, `${GREEN}$1${RESET}`)
-      .replace(/^### (.+)/, `${YELLOW}$1${RESET}`)
-      .replace(/^## (.+)/, `${CYAN}$1${RESET}`)
-      .replace(/^# (.+)/, `${BOLD}$1${RESET}`);
-    console.log(rendered);
+    console.log(line.replace(/\*\*(.+?)\*\*/g, `${BOLD}$1${RESET}`).replace(/`(.+?)`/g, `${GREEN}$1${RESET}`));
   }
 }
 
-function printThinking(text) {
-  if (!text) return;
-  console.log(DIM + '🤔 ' + text.replace(/\n/g, '\n   ') + RESET);
-}
+async function runPrompt(prompt, session, opts) {
+  const agentName = opts.agent || 'primary';
+  const ac = opts.agentConfig || getAgentConfig(agentName);
+  const provider = opts.provider || ac.provider;
+  const model = opts.model || ac.model;
+  const apiKey = opts.apiKey || ac.apiKey || getApiKey(provider);
+  const baseUrl = opts.baseUrl || ac.baseUrl;
 
-async function runTerminal(prompt, session, { apiKey, baseUrl, model }) {
-  const cwd = session.cwd;
-  const provider = getProvider();
-  const modelName = model || getModel();
-  const parts = modelName.split('/');
-  const providerName = provider || parts[0] || 'opencode';
-  const mName = parts[1] || parts[0];
-  const key = apiKey || getApiKey(providerName) || getApiKey('opencode');
-  const bUrl = baseUrl || getBaseUrl(providerName);
-  const instructions = loadProjectInstructions(cwd);
-
+  const instructions = loadProjectHints(session.cwd);
   session.messages.push({ role: 'user', content: prompt });
 
-  const onStream = ({ content, done }) => {
-    if (content) process.stdout.write(content);
-    if (done) process.stdout.write('\n');
-  };
+  const onStream = opts.tui
+    ? (chunk) => { if (chunk) process.stdout.write(chunk); }
+    : undefined;
 
-  const onToolCall = async (tc) => {
-    const name = tc.function?.name || tc.tool_name || 'tool';
-    const args = tc.function?.arguments || '{}';
-    let desc = '';
-    try { const a = JSON.parse(typeof args === 'string' ? args : '{}'); desc = a.description || a.command || a.path || ''; } catch {}
-    process.stdout.write(`\n${DIM}⎿  using ${name}${desc ? ': ' + desc : ''}${RESET}\n`);
-  };
+  const onToolCall = opts.tui
+    ? async (tc) => {
+        const name = tc.function?.name || 'tool';
+        let desc = '';
+        try { const a = JSON.parse(tc.function?.arguments || '{}'); desc = a.description || a.command || a.path || ''; } catch {}
+        process.stdout.write(`\n${DIM}⎿  ${name}${desc ? ': ' + desc : ''}${RESET}\n`);
+        if (opts.verbose) process.stdout.write(DIM + tc.function?.arguments?.slice(0, 200) + RESET + '\n');
+      }
+    : undefined;
 
-  try {
-    const result = await runAgentLoop({
-      provider: providerName, model: mName, apiKey: key, baseUrl: bUrl,
-      messages: session.messages, tools, onStream, onToolCall, modelName: mName,
-    });
-    session.messages = result.messages;
-    session.save();
-    printStats(result.turnCount);
-  } catch (err) {
-    console.error(`\n${RED}Error:${RESET} ${err.message}`);
-    process.exit(1);
+  const result = await run({
+    provider, model, apiKey, baseUrl,
+    maxTokens: ac.maxTokens, temperature: ac.temperature, system: ac.system,
+    messages: session.messages, tools,
+    onStream, onToolCall, modelName: model,
+  });
+
+  session.messages = result.messages;
+  session.save();
+  return result;
+}
+
+export async function cli(argv) {
+  ensureDirs();
+
+  if (!argv.length || argv[0] === '-h' || argv[0] === '--help' || argv[0] === 'help') {
+    help();
+    return;
   }
-}
 
-function printStats(turns) {
-  const tc = getTokenCache();
-  console.log(DIM + `— ${turns} turn(s), ${(tc.totalInput + tc.totalOutput).toLocaleString()} tokens total, $${tc.totalCost.toFixed(4)} cost${RESET}`);
-}
+  if (argv[0] === 'version' || argv[0] === '--version') {
+    console.log('1.0.0');
+    return;
+  }
 
-export async function cli(args) {
-  if (!args.length || args[0] === '--help' || args[0] === '-h') { printHelp(); return; }
-
-  ensureConfigDir();
-
+  // Parse CLI options
+  const opts = { tools: null };
   let i = 0;
-  const opts = {};
-  while (i < args.length) {
-    if (args[i] === '--model') opts.model = args[++i];
-    else if (args[i] === '--provider') opts.provider = args[++i];
-    else if (args[i] === '--api-key') opts.apiKey = args[++i];
-    else if (args[i] === '--base-url') opts.baseUrl = args[++i];
-    else if (args[i] === '-y') opts.yes = true;
-    else break;
+  while (i < argv.length && argv[i].startsWith('-') && argv[i] !== '--') {
+    switch (argv[i]) {
+      case '-p': case '--prompt': opts.prompt = argv[++i]; break;
+      case '-c': case '--continue': opts.continue = true; break;
+      case '-m': case '--model': opts.model = argv[++i]; break;
+      case '--agent': opts.agent = argv[++i]; break;
+      case '-d': opts.debug = true; break;
+      case '--verbose': opts.verbose = true; break;
+      case '-q': opts.quiet = true; break;
+      case '-f': case '--format': opts.format = argv[++i]; break;
+      case '--allowedTools': opts.allowedTools = argv[++i].split(','); break;
+      case '--excludedTools': opts.excludedTools = argv[++i].split(','); break;
+      case '-cwd': opts.cwd = resolve(argv[++i]); break;
+      default: break;
+    }
     i++;
   }
 
-  const cmd = args[i];
-  const rest = args.slice(i + 1);
+  const cmd = argv[i];
+  const rest = argv.slice(i + 1);
   const prompt = rest.join(' ');
 
-  switch (cmd) {
-    case 'exec': {
-      if (!prompt) { console.error('Error: no prompt provided'); process.exit(1); }
-      const session = new Session(null, process.cwd());
-      await runTerminal(prompt, session, opts);
-      break;
-    }
+  // Commands
+  if (cmd === 'run') {
+    if (!prompt) { console.error('Usage: opencode run <prompt>'); return; }
+    const session = new Session(null, opts.cwd || process.cwd());
+    await runPrompt(prompt, session, opts);
+    const last = session.messages.filter(m => m.role === 'assistant').pop();
+    if (last?.content) printMarkdown(last.content);
+    return;
+  }
 
-    case 'resume': {
-      const sessions = Session.list(process.cwd());
-      if (!sessions.length) { console.log('No sessions found.'); return; }
-      let session;
-      if (rest[0]) {
-        session = Session.load(rest[0]);
-        if (!session) { console.error('Session not found:', rest[0]); process.exit(1); }
-      } else {
-        session = sessions[0];
+  if (cmd === 'continue') {
+    const sid = rest[0] || null;
+    const session = sid ? Session.load(sid) : Session.recent();
+    if (!session) { console.log('No sessions to continue.'); return; }
+    if (!prompt) {
+      const { startTUI, cleanup } = await import('./tui.js');
+      const tui = startTUI({ autoPrompt: true });
+      tui.addMessage('assistant', `Resumed session ${session.id}`);
+      for (const m of session.messages) {
+        if (m.role === 'user') tui.addMessage('user', typeof m.content === 'string' ? m.content : '(tool call)');
+        else if (m.role === 'assistant' && m.content && m.content !== '_empty_') tui.addMessage('assistant', m.content);
+        else if (m.role === 'tool') tui.addOutput(m.content?.slice(0, 200));
       }
-      const cwd = session.cwd || process.cwd();
-      const lastMsg = session.messages.filter(m => m.role !== 'system' && m.role !== 'tool').slice(-1)[0];
-      if (lastMsg) console.log(`${DIM}Previous: ${typeof lastMsg.content === 'string' ? lastMsg.content.substring(0, 100) + (lastMsg.content.length > 100 ? '...' : '') : ''}${RESET}`);
-      session.save();
-      console.log(`${DIM}Resumed session ${session.id.substring(0, 8)}...${RESET}`);
-      const { createInterface } = await import('readline');
-      const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-      const ask = () => {
-        rl.question(`\n${CYAN}>>>${RESET} `, async (input) => {
-          if (input === 'exit' || input === 'quit') { rl.close(); return; }
-          await runTerminal(input, session, opts);
-          ask();
-        });
-      };
-      ask();
+      tui.setStatus(`Session ${session.id}`);
+      tui.onMessage(async (msg) => {
+        tui.inputActive(false);
+        tui.addMessage('user', msg);
+        try {
+          const result = await runPrompt(msg, session, { ...opts, tui });
+          for (const m of result.messages.slice(-1)) {
+            if (m.content && m.content !== '_empty_') tui.addMessage('assistant', m.content);
+          }
+        } catch (e) {
+          tui.addChatLine(RED + 'Error: ' + e.message + RESET);
+        }
+        tui.inputActive(true);
+      });
       return;
     }
-
-    case 'fork': {
-      const sessions = Session.list(process.cwd());
-      if (!sessions.length) { console.log('No sessions to fork.'); return; }
-      const srcId = rest[0] || sessions[0].id;
-      const src = Session.load(srcId);
-      if (!src) { console.error('Session not found:', srcId); process.exit(1); }
-      const fork = new Session(null, process.cwd());
-      fork.messages = src.messages.slice(0, -1);
-      fork.save();
-      console.log(`Forked session ${fork.id.substring(0, 8)}... from ${srcId.substring(0, 8)}...`);
-      break;
-    }
-
-    case 'web': {
-      const { startWebUI } = await import('./webui.js');
-      const port = parseInt(rest[0] || '3000', 10);
-      await startWebUI(port);
-      break;
-    }
-
-    case 'mcp': {
-      const { startMCPServer } = await import('./mcp-server.js');
-      await startMCPServer();
-      break;
-    }
-
-    case 'auth': {
-      const providerArg = rest[0];
-      const keyArg = rest[1];
-      if (!providerArg || !keyArg) {
-        console.log('Usage: opencode auth <provider> <api-key>');
-        console.log('Providers: openai, anthropic, google, groq, bedrock, opencode, openrouter');
-        console.log('Current keys:');
-        const cfg = loadConfig();
-        for (const [p, k] of Object.entries(cfg.apiKeys || {})) {
-          console.log(`  ${p}: ${k.substring(0, 8)}...${k.substring(k.length - 4)}`);
-        }
-        return;
-      }
-      setApiKey(providerArg, keyArg);
-      console.log(`Saved API key for ${providerArg}`);
-      break;
-    }
-
-    case 'model': {
-      if (!rest[0]) {
-        console.log(`Current model: ${getModel()}`);
-        console.log(`Usage: opencode model <provider/model-name>`);
-        return;
-      }
-      setModel(rest[0]);
-      console.log(`Model set to ${rest[0]}`);
-      break;
-    }
-
-    case 'doctor': {
-      const { runDoctor } = await import('./doctor.js');
-      await runDoctor();
-      break;
-    }
-
-    case 'list': {
-      const sessions = Session.list(process.cwd());
-      if (!sessions.length) { console.log('No sessions.'); return; }
-      for (const s of sessions) {
-        const last = s.messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-1)[0];
-        const preview = typeof last?.content === 'string' ? last.content.substring(0, 60) : '(empty)';
-        console.log(`${s.id.substring(0, 8)}  ${new Date(s.updated).toLocaleString()}  ${preview}${preview.length >= 60 ? '...' : ''}`);
-      }
-      break;
-    }
-
-    case 'delete': {
-      if (!rest[0]) { console.error('Usage: opencode delete <session-id>'); return; }
-      if (deleteSession(rest[0])) console.log('Deleted:', rest[0].substring(0, 8));
-      else console.log('Not found:', rest[0].substring(0, 8));
-      break;
-    }
-
-    case 'cleanup': {
-      const count = Session.cleanup();
-      console.log(`Cleaned up ${count} empty sessions.`);
-      break;
-    }
-
-    case 'stats': {
-      const tc = getTokenCache();
-      console.log(`Tokens: ${tc.totalInput.toLocaleString()} input, ${tc.totalOutput.toLocaleString()} output`);
-      console.log(`Total cost: $${tc.totalCost.toFixed(4)}`);
-      break;
-    }
-
-    default: {
-      const prompt = args.join(' ');
-      if (!prompt) { printHelp(); return; }
-      const session = new Session(null, process.cwd());
-      await runTerminal(prompt, session, opts);
-    }
+    await runPrompt(prompt, session, opts);
+    const last = session.messages.filter(m => m.role === 'assistant').pop();
+    if (last?.content) printMarkdown(last.content);
+    return;
   }
+
+  if (cmd === 'auth') {
+    const prov = rest[0];
+    const key = rest[1];
+    if (!prov) {
+      console.log('Usage: opencode auth <provider> [api-key]');
+      console.log('Providers: openai, anthropic, google, groq, bedrock, ollama, opencode, openrouter');
+      const cfg = loadConfig();
+      if (cfg.apiKeys) {
+        console.log('');
+        for (const [p, k] of Object.entries(cfg.apiKeys)) {
+          console.log(`  ${p}: ${k.slice(0, 8)}...${k.slice(-4)}`);
+        }
+      }
+      return;
+    }
+    if (!key) {
+      console.log(getApiKey(prov) ? `${prov}: key is set` : `${prov}: no key`);
+      return;
+    }
+    setApiKey(prov, key);
+    console.log(`Saved API key for ${prov}`);
+    return;
+  }
+
+  if (cmd === 'models') {
+    const { listProviders } = await import('./providers/index.js');
+    const providers = listProviders();
+    console.log('Available providers:');
+    for (const p of providers) {
+      const key = getApiKey(p);
+      console.log(`  ${p}${key ? ' ✓' : ''}`);
+    }
+    const cfg = loadConfig();
+    if (cfg.providers) {
+      console.log('\nConfigured:');
+      for (const [p, c] of Object.entries(cfg.providers)) {
+        console.log(`  ${p}: ${c.model || '(default)'}`);
+      }
+    }
+    return;
+  }
+
+  if (cmd === 'serve' || cmd === 'web') {
+    const { startWeb } = await import('./web.js');
+    const port = parseInt(rest[0] || (argv.includes('--port') ? argv[argv.indexOf('--port') + 1] : '3000'), 10);
+    const host = argv.includes('--hostname') ? argv[argv.indexOf('--hostname') + 1] : '0.0.0.0';
+    await startWeb(port, host);
+    return;
+  }
+
+  if (cmd === 'mcp') {
+    const { startMCP } = await import('./mcp.js');
+    await startMCP();
+    return;
+  }
+
+  if (cmd === 'agent' && rest[0] === 'create') {
+    const { createInterface } = await import('readline');
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const ask = (q) => new Promise(r => rl.question(q, r));
+    console.log('Create a custom agent:');
+    const name = await ask('  Name: ');
+    const model = await ask('  Model (provider/model): ') || 'opencode/big-pickle';
+    const system = await ask('  System prompt (optional): ');
+    const maxTokens = await ask('  Max tokens (default 4096): ') || '4096';
+    rl.close();
+    const cfg = loadConfig();
+    if (!cfg.agents) cfg.agents = {};
+    cfg.agents[name] = { model, maxTokens: parseInt(maxTokens), system };
+    saveConfig(cfg);
+    console.log(`Agent '${name}' created. Use: opencode --agent ${name} <prompt>`);
+    return;
+  }
+
+  if (cmd === 'stats') {
+    const tc = getTokenCache();
+    console.log(`  Total input:  ${tc.totalInput.toLocaleString()} tokens`);
+    console.log(`  Total output: ${tc.totalOutput.toLocaleString()} tokens`);
+    console.log(`  Total cost:   $${tc.totalCost.toFixed(4)}`);
+    return;
+  }
+
+  if (cmd === 'sessions') {
+    const sessions = Session.list();
+    if (!sessions.length) { console.log('No sessions.'); return; }
+    for (const s of sessions) {
+      const last = s.messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-1)[0];
+      const pre = typeof last?.content === 'string' ? last.content.slice(0, 60) : '';
+      console.log(`${s.id}  ${new Date(s.updated).toLocaleString()}  ${pre}${pre.length >= 60 ? '...' : ''}`);
+    }
+    return;
+  }
+
+  if (cmd === 'session' && rest[0] === 'delete') {
+    const id = rest[1];
+    if (!id) { console.log('Usage: opencode session delete <id>'); return; }
+    if (deleteSession(id)) console.log('Deleted:', id);
+    else console.log('Not found:', id);
+    return;
+  }
+
+  if (cmd === 'doctor') {
+    const rl = await import('./doctor.js');
+    await rl.runDoctor();
+    return;
+  }
+
+  if (cmd === 'cleanup') {
+    const { Session } = await import('./session.js');
+    const n = Session.cleanup();
+    console.log(`Cleaned up ${n} empty sessions.`);
+    return;
+  }
+
+  // Default: launch TUI or run prompt
+  if (opts.continue) {
+    const session = Session.recent();
+    if (!session) { console.log('No sessions to continue.'); return; }
+    const { startTUI, cleanup } = await import('./tui.js');
+    const tui = startTUI({ autoPrompt: true });
+    tui.addMessage('assistant', `Resumed session ${session.id}`);
+    for (const m of session.messages) {
+      if (m.role === 'user') tui.addMessage('user', typeof m.content === 'string' ? m.content : '(tool call)');
+      else if (m.role === 'assistant' && m.content && m.content !== '_empty_') tui.addMessage('assistant', m.content);
+    }
+    tui.onMessage(async (msg) => {
+      tui.inputActive(false);
+      tui.addMessage('user', msg);
+      try {
+        const result = await runPrompt(msg, session, { ...opts, tui });
+        for (const m of result.messages.slice(-1)) {
+          if (m.content && m.content !== '_empty_') tui.addMessage('assistant', m.content);
+        }
+      } catch (e) {
+        tui.addChatLine(RED + 'Error: ' + e.message + RESET);
+      }
+      tui.inputActive(true);
+    });
+    return;
+  }
+
+  if (opts.prompt || prompt) {
+    const p = opts.prompt || prompt;
+    const session = new Session(null, opts.cwd || process.cwd());
+    const result = await runPrompt(p, session, opts);
+    const last = result.messages.filter(m => m.role === 'assistant').pop();
+    if (opts.format === 'json') {
+      console.log(JSON.stringify({ response: last?.content || '', turns: result.turnCount }));
+    } else if (last?.content) {
+      printMarkdown(last.content);
+    }
+    return;
+  }
+
+  // Launch TUI (like original opencode)
+  const { startTUI, cleanup } = await import('./tui.js');
+  const tui = startTUI({ autoPrompt: true });
+  const session = new Session(null, opts.cwd || process.cwd());
+  tui.addChatLine(GREEN + BOLD + 'OpenCode-32' + RESET + DIM + ' — interactive coding agent' + RESET);
+  tui.addChatLine(DIM + 'Type a message, /help for commands' + RESET);
+
+  tui.onMessage(async (msg) => {
+    tui.inputActive(false);
+    tui.addMessage('user', msg);
+    try {
+      const result = await runPrompt(msg, session, { ...opts, tui });
+      for (const m of result.messages.slice(-1)) {
+        if (m.content && m.content !== '_empty_') tui.addMessage('assistant', m.content);
+      }
+    } catch (e) {
+      tui.addChatLine(RED + 'Error: ' + e.message + RESET);
+    }
+    tui.inputActive(true);
+  });
 }

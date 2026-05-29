@@ -1,13 +1,19 @@
-import { BaseProvider } from './base.js';
+export class OpenAIProvider {
+  constructor(config) {
+    this.baseUrl = config.baseUrl || 'https://api.openai.com/v1';
+    this.apiKey = config.apiKey || '';
+    this.model = config.model || 'gpt-4o';
+    this.maxTokens = config.maxTokens || 4096;
+    this.temperature = config.temperature ?? 0.3;
+    this.headers = config.headers || {};
+  }
 
-export class OpenAIProvider extends BaseProvider {
   async chat(messages, tools, onStream) {
-    const url = `${this.config.baseUrl}/chat/completions`;
     const body = {
-      model: this.config.model,
-      messages: this.formatMessages(messages),
-      max_tokens: this.config.maxTokens || 4096,
-      temperature: this.config.temperature ?? 0.3,
+      model: this.model,
+      messages,
+      max_tokens: this.maxTokens,
+      temperature: this.temperature,
       stream: !!onStream,
     };
     if (tools && tools.length) {
@@ -16,20 +22,16 @@ export class OpenAIProvider extends BaseProvider {
         function: { name: t.name, description: t.description, parameters: t.parameters },
       }));
     }
-    const res = await fetch(url, {
+    const res = await fetch(this.baseUrl + '/chat/completions', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.config.apiKey}`,
-        ...(this.config.headers || {}),
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.apiKey}`, ...this.headers },
       body: JSON.stringify(body),
     });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      throw new Error(`OpenAI API error ${res.status}: ${err.substring(0, 300)}`);
+      throw new Error(`API error ${res.status}: ${err.slice(0, 300)}`);
     }
-    if (onStream) return this._handleStream(res, onStream);
+    if (onStream) return this._stream(res, onStream);
     const data = await res.json();
     const choice = data.choices?.[0];
     return {
@@ -40,44 +42,43 @@ export class OpenAIProvider extends BaseProvider {
     };
   }
 
-  async _handleStream(res, onStream) {
+  async _stream(res, onStream) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buf = '';
     let content = '';
     let toolCalls = [];
     let finishReason = '';
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        const jsonStr = trimmed.slice(6);
-        if (jsonStr === '[DONE]') { finishReason = 'stop'; break; }
+        const t = line.trim();
+        if (!t.startsWith('data: ')) continue;
+        const j = t.slice(6);
+        if (j === '[DONE]') { finishReason = 'stop'; break; }
         try {
-          const data = JSON.parse(jsonStr);
-          const delta = data.choices?.[0]?.delta;
-          if (delta?.content) { content += delta.content; onStream({ content: delta.content, done: false }); }
+          const d = JSON.parse(j);
+          const delta = d.choices?.[0]?.delta;
+          if (delta?.content) { content += delta.content; onStream(delta.content); }
           if (delta?.tool_calls) {
             for (const tc of delta.tool_calls) {
-              const existing = toolCalls.find(t => t.index === tc.index);
-              if (existing) {
-                if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
+              let found = toolCalls.find(x => x.index === tc.index);
+              if (found) {
+                if (tc.function?.arguments) found.function.arguments += tc.function.arguments;
               } else {
                 toolCalls.push({ index: tc.index, id: tc.id || '', type: 'function', function: { name: tc.function?.name || '', arguments: tc.function?.arguments || '' } });
               }
             }
           }
-          if (data.choices?.[0]?.finish_reason) finishReason = data.choices[0].finish_reason;
+          if (d.choices?.[0]?.finish_reason) finishReason = d.choices[0].finish_reason;
         } catch {}
       }
     }
-    onStream({ content: '', done: true });
+    onStream(null);
     return {
       content,
       toolCalls: toolCalls.filter(t => t.id).map(t => ({ id: t.id, type: 'function', function: { name: t.function.name, arguments: t.function.arguments } })),
