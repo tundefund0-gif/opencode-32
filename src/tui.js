@@ -1,267 +1,230 @@
-import { stdin, stdout, exit, platform } from 'process';
-import { createInterface } from 'readline';
+import { stdin, stdout, exit } from 'process';
 
-const ESC = '\x1b';
-const CSI = ESC + '[';
+const CSI = '\x1b[';
 const SGR = (n) => CSI + n + 'm';
 const CUP = (r, c) => CSI + r + ';' + c + 'H';
-const ED = (n) => CSI + n + 'J';
 const EL = (n) => CSI + n + 'K';
-const DSR = CSI + '6n';
-const SCOSC = ESC + '7';
-const SCORC = ESC + '8';
-const STBM = (t, b) => CSI + t + ';' + b + 'r';
+const ED = CSI + '2J';
 
-const BOLD = SGR(1), DIM = SGR(2), ITALIC = SGR(3), RESET = SGR(0);
-const BLACK = SGR(30), RED = SGR(31), GREEN = SGR(32), YELLOW = SGR(33), BLUE = SGR(34), MAGENTA = SGR(35), CYAN = SGR(36), WHITE = SGR(37);
-const BG_BLACK = SGR(40), BG_BLUE = SGR(44), BG_DARK = SGR(48 + 5) + '236m';
-const BRIGHT_BLACK = SGR(90), BRIGHT_WHITE = SGR(97);
+const R = SGR(0), B = SGR(1), D = SGR(2);
+const G = SGR(32), C = SGR(36), Y = SGR(33), Rr = SGR(31);
 
-let rows = 0, cols = 0;
-let inputBuffer = [];
-let inputPos = 0;
-let history = [];
-let historyIdx = -1;
-let chatLines = [];
-let scrollOffset = 0;
-let statusMsg = '';
-let statusColor = '';
-let inputActive = true;
-let mode = 'insert';
-let messageCallback = null;
-let interruptCallback = null;
-let onResize = null;
+let rows = 24, cols = 80;
+let chatHistory = [];
+let scrollPos = 0;
+let inputBuf = '';
+let inputCur = 0;
+let hist = [];
+let histIdx = 0;
+let statusText = '';
+let msgCallback = null;
+let intCallback = null;
+let running = true;
 
-function getSize() {
-  try { rows = stdout.rows || 24; cols = stdout.columns || 80; } catch {}
-}
+function sz() { try { rows = stdout.rows || 24; cols = stdout.columns || 80; } catch {} }
 
-function emit(data) { stdout.write(data); }
+function w(s) { stdout.write(s); }
 
-function cursorTo(r, c) { emit(CUP(r + 1, c + 1)); }
+function pos(r, c) { w(CUP(r + 1, c + 1)); }
 
-function clearLine() { emit(EL(2)); }
+function clr() { w(EL(2)); }
 
-function clearScreen() { emit(ED(2)); }
+function scr() { w(ED); pos(0, 0); }
 
-function showCursor(show) { emit(show ? ESC + '?25h' : ESC + '?25l'); }
+function chatRows() { return Math.max(1, rows - 3); }
 
-function rawMode(on) {
-  if (on) {
-    stdin.setRawMode(true);
-    stdin.resume();
-  } else {
-    stdin.setRawMode(false);
-    stdin.pause();
-  }
-}
-
-function drawStatusBar() {
-  cursorTo(rows - 1, 0);
-  clearLine();
-  const m = mode === 'insert' ? 'INSERT' : 'NORMAL';
-  const left = statusColor + ' ' + m + ' ' + RESET;
-  if (statusMsg) {
-    const right = DIM + statusMsg.substring(0, cols - 20) + RESET;
-    const pad = cols - visibleLen(left) - visibleLen(right);
-    emit(left + ' '.repeat(Math.max(0, pad)) + right);
-  } else {
-    emit(left + DIM + ' /help for commands' + RESET);
-    emit(EL(0));
-  }
-}
-
-function visibleLen(s) {
-  return s.replace(/\x1b\[[0-9;]*m/g, '').length;
-}
-
-function drawChat() {
-  const chatRows = rows - 3;
-  const start = Math.max(0, chatLines.length - chatRows - scrollOffset);
-  const end = Math.min(chatLines.length, start + chatRows);
-  for (let i = 0; i < chatRows; i++) {
-    cursorTo(i, 0);
-    clearLine();
+function draw() {
+  const cr = chatRows();
+  const start = Math.max(0, chatHistory.length - cr - scrollPos);
+  const end = Math.min(chatHistory.length, start + cr);
+  for (let i = 0; i < cr; i++) {
+    pos(i, 0); clr();
     const idx = start + i;
-    if (idx < chatLines.length) {
-      const line = chatLines[idx];
-      emit(line.substring(0, cols - 1));
-    }
+    if (idx < chatHistory.length) w(chatHistory[idx].slice(0, cols - 1));
   }
+  // Input line
+  const iy = rows - 3;
+  pos(iy, 0); clr();
+  w('> ' + inputBuf.slice(0, cols - 2));
+  // Status bar
+  const sy = rows - 2;
+  pos(sy, 0); clr();
+  const left = ' ' + (hist.length > 0 ? 'HIST' : 'INSERT') + ' ';
+  const right = statusText ? ' ' + statusText + ' ' : ' /help for commands ';
+  w(D + left + R);
+  const pad = cols - left.replace(/\x1b\[[0-9;]*m/g, '').length - right.replace(/\x1b\[[0-9;]*m/g, '').length - 2;
+  if (pad > 0) w(' '.repeat(pad));
+  w(D + right + R);
+  // Bottom spacer
+  const by = rows - 1;
+  pos(by, 0); clr();
+  // Cursor
+  pos(iy, 2 + inputCur);
 }
 
-function drawInputLine() {
-  cursorTo(rows - 2, 0);
-  clearLine();
-  const prefix = mode === 'insert' ? '> ' : ':';
-  const text = prefix + inputBuffer.join('');
-  emit(text.substring(0, cols - 1));
-  const curX = (prefix.length + inputPos) % cols;
-  const curY = rows - 2 + Math.floor((prefix.length + inputPos) / cols);
-  cursorTo(curY, curX);
+export function startTUI(opts = {}) {
+  msgCallback = opts.onMessage || null;
+  intCallback = opts.onInterrupt || null;
+  sz();
+  stdin.setRawMode(true);
+  stdin.resume();
+  scr();
+
+  if (opts.autoPrompt) {
+    addChatLine(G + B + 'OpenCode-32' + R + D + ' — interactive coding agent' + R);
+  }
+
+  stdin.on('data', handler);
+  stdout.on('resize', () => { sz(); if (running) draw(); });
+
+  // Send cursor to bottom on clean exit
+  process.on('exit', cleanup);
+
+  draw();
+
+  const api = {
+    addMessage(role, content) {
+      const p = role === 'user' ? (G + 'You' + R) : (C + 'AI' + R);
+      for (const l of content.split('\n')) addChatLine(p + ' ' + l);
+    },
+    addOutput(content) {
+      if (!content) return;
+      for (const l of content.split('\n')) addChatLine(D + l + R);
+    },
+    setStatus(s) { statusText = s; if (running) draw(); },
+    addChatLine,
+    inputActive(v) { if (!v && running) draw(); },
+  };
+  return api;
 }
 
-function drawAll() {
-  drawChat();
-  drawInputLine();
-  drawStatusBar();
+function addChatLine(text) {
+  chatHistory.push(text || '');
+  scrollPos = 0;
+  if (running) draw();
 }
 
-function addChatLine(text, color = '') {
-  chatLines.push(color + text + RESET);
-  scrollOffset = 0;
-  drawAll();
-}
-
-function setStatus(msg, color = DIM) {
-  statusMsg = msg;
-  statusColor = color;
-  drawStatusBar();
-}
-
-function isASCII(code) { return code >= 32 && code <= 126; }
-
-function onKey(data) {
-  if (!inputActive) return;
+function handler(data) {
+  if (!running) return;
   const key = data.toString();
 
-  if (key === '\x03') { // Ctrl-C
-    if (interruptCallback) interruptCallback();
-    else exit(0);
+  if (key === '\x03') {
+    cleanup();
+    if (intCallback) intCallback();
+    else process.exit(0);
     return;
   }
 
-  if (key === '\x1b') { // ESC
-    if (mode === 'insert') {
-      mode = 'normal';
-      drawAll();
-    } else {
-      mode = 'insert';
-      drawAll();
-    }
-    return;
-  }
-
-  if (mode === 'normal') {
-    if (key === 'i' || key === 'a') { mode = 'insert'; drawAll(); return; }
-    if (key === 'j') { if (scrollOffset > 0) { scrollOffset--; drawChat(); drawStatusBar(); } return; }
-    if (key === 'k') { const max = Math.max(0, chatLines.length - (rows - 3)); if (scrollOffset < max) { scrollOffset++; drawChat(); drawStatusBar(); } return; }
-    if (key === 'g') { scrollOffset = chatLines.length; drawChat(); drawStatusBar(); return; }
-    if (key === 'G') { scrollOffset = 0; drawChat(); drawStatusBar(); return; }
-    if (key === '\r') { mode = 'insert'; drawAll(); return; }
-    return;
-  }
-
-  if (key === '\r') { // Enter
-    const msg = inputBuffer.join('').trim();
-    inputBuffer = []; inputPos = 0;
-    drawInputLine();
+  if (key === '\r' || key === '\n') {
+    const msg = inputBuf.trim();
+    inputBuf = '';
+    inputCur = 0;
     if (msg) {
-      history.push(msg); historyIdx = history.length;
+      hist.push(msg);
+      histIdx = hist.length;
       if (msg.startsWith('/')) {
-        handleCommand(msg);
-      } else {
-        if (messageCallback) messageCallback(msg);
+        handleSlash(msg);
+      } else if (msgCallback) {
+        msgCallback(msg);
       }
     }
+    if (running) draw();
     return;
   }
 
-  if (key === '\x7f' || key === '\b') { // Backspace
-    if (inputPos > 0) { inputPos--; inputBuffer.splice(inputPos, 1); drawInputLine(); }
+  if (key === '\x7f' || key === '\b') {
+    if (inputCur > 0) {
+      inputCur--;
+      inputBuf = inputBuf.slice(0, inputCur) + inputBuf.slice(inputCur + 1);
+    }
+    if (running) draw();
     return;
   }
 
-  if (key === '\x1b[A') { // Up
-    if (historyIdx > 0) { historyIdx--; inputBuffer = history[historyIdx].split(''); inputPos = inputBuffer.length; drawInputLine(); }
+  if (key === '\x1b[A') {
+    if (histIdx > 0) { histIdx--; inputBuf = hist[histIdx]; inputCur = inputBuf.length; }
+    if (running) draw();
     return;
   }
 
-  if (key === '\x1b[B') { // Down
-    if (historyIdx < history.length - 1) { historyIdx++; inputBuffer = history[historyIdx].split(''); inputPos = inputBuffer.length; drawInputLine(); }
-    else { historyIdx = history.length; inputBuffer = []; inputPos = 0; drawInputLine(); }
+  if (key === '\x1b[B') {
+    if (histIdx < hist.length - 1) { histIdx++; inputBuf = hist[histIdx]; inputCur = inputBuf.length; }
+    else { histIdx = hist.length; inputBuf = ''; inputCur = 0; }
+    if (running) draw();
     return;
   }
 
-  if (key === '\x1b[C') { // Right
-    if (inputPos < inputBuffer.length) { inputPos++; drawInputLine(); }
+  if (key === '\x1b[C') {
+    if (inputCur < inputBuf.length) { inputCur++; }
+    if (running) draw();
     return;
   }
 
-  if (key === '\x1b[D') { // Left
-    if (inputPos > 0) { inputPos--; drawInputLine(); }
+  if (key === '\x1b[D') {
+    if (inputCur > 0) { inputCur--; }
+    if (running) draw();
     return;
   }
 
+  // j/k scroll in chat
+  if (key === '\x1bOA' || key === 'k') {
+    const max = Math.max(0, chatHistory.length - chatRows());
+    if (scrollPos < max) { scrollPos++; }
+    if (running) draw();
+    return;
+  }
+
+  if (key === '\x1bOB' || key === 'j') {
+    if (scrollPos > 0) { scrollPos--; }
+    if (running) draw();
+    return;
+  }
+
+  // Printable
   if (key.length === 1 && key.charCodeAt(0) >= 32) {
-    inputBuffer.splice(inputPos, 0, key);
-    inputPos++;
-    drawInputLine();
+    inputBuf = inputBuf.slice(0, inputCur) + key + inputBuf.slice(inputCur);
+    inputCur++;
+    if (running) draw();
   }
 }
 
-function handleCommand(msg) {
-  const parts = msg.split(/\s+/);
-  const cmd = parts[0].toLowerCase();
-  switch (cmd) {
-    case '/help': addChatLine('Commands: /help /init /undo /redo /share /clear /exit', CYAN); break;
-    case '/clear': chatLines = []; scrollOffset = 0; drawAll(); break;
-    case '/exit': cleanup(); exit(0); break;
-    case '/init': addChatLine('Session initialized', GREEN); break;
-    default: addChatLine('Unknown command: ' + cmd, RED);
+function handleSlash(cmd) {
+  const parts = cmd.split(/\s+/);
+  switch (parts[0]) {
+    case '/help':
+      addChatLine(C + 'Commands: /help /clear /exit /init' + R);
+      break;
+    case '/clear':
+      chatHistory = [];
+      scrollPos = 0;
+      if (running) draw();
+      break;
+    case '/init':
+      addChatLine('Session reinitialized');
+      break;
+    case '/exit':
+      cleanup();
+      process.exit(0);
+      break;
+    case '/undo':
+      addChatLine('Undo not yet implemented');
+      break;
+    case '/redo':
+      addChatLine('Redo not yet implemented');
+      break;
+    default:
+      addChatLine(Rr + 'Unknown: ' + cmd + R);
   }
 }
 
-export function cleanup() {
+function cleanup() {
   try {
-    rawMode(false);
-    showCursor(true);
-    cursorTo(rows - 1, 0);
-    clearLine();
-    emit(RESET);
+    running = false;
+    stdin.setRawMode(false);
+    stdin.pause();
+    stdout.write(CSI + '?25h');
+    pos(rows - 1, 0);
+    clr();
+    w(R);
   } catch {}
-}
-
-export function startTUI({ onMessage, onInterrupt, autoPrompt } = {}) {
-  messageCallback = onMessage;
-  interruptCallback = onInterrupt;
-  getSize();
-  showCursor(false);
-  rawMode(true);
-  clearScreen();
-  drawAll();
-
-  if (autoPrompt) {
-    addChatLine('OpenCode-32', GREEN + BOLD);
-    addChatLine('Type /help for commands or start typing.', DIM);
-  }
-
-  stdin.on('data', onKey);
-  stdout.on('resize', () => {
-    getSize();
-    STBM(0, rows - 3);
-    drawAll();
-  });
-
-  STBM(0, rows - 3);
-
-  return {
-    addMessage: (role, content) => {
-      const prefix = role === 'user' ? (GREEN + 'You') : (CYAN + 'AI');
-      const lines = (prefix + RESET + ' ' + content).split('\n');
-      for (const line of lines) addChatLine(line);
-    },
-    addOutput: (content) => {
-      if (!content) return;
-      const lines = content.split('\n');
-      for (const line of lines) addChatLine(line, DIM);
-    },
-    addToolCall: (name, args) => {
-      addChatLine(DIM + '⎿  using ' + name + RESET, DIM);
-    },
-    setStatus,
-    cleanup,
-    addChatLine,
-    inputActive: (v) => { inputActive = v; },
-  };
 }
