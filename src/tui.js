@@ -105,18 +105,16 @@ export function startTUI(opts = {}) {
       chatHistory.push(p + ' ');
       if (running) draw();
       return (chunk) => {
-        if (chunk === null) return; // null = done, handled by endStream
+        if (!chunk) return;
         streamText += chunk;
-        chatHistory[streamLine] = (p + ' ' + streamText).slice(0, cols * 4);
+        chatHistory[streamLine] = p + ' ' + streamText;
         if (running) {
-          // Redraw just the stream line for performance
           const cr = chatRows();
           const start = Math.max(0, chatHistory.length - cr - scrollPos);
           const lineIdx = streamLine - start;
           if (lineIdx >= 0 && lineIdx < cr) {
             pos(lineIdx, 0); clr();
             w(chatHistory[streamLine].slice(0, cols - 1));
-            // Restore cursor to input
             const iy = rows - 3;
             pos(iy, 2 + inputCur);
           } else {
@@ -125,7 +123,11 @@ export function startTUI(opts = {}) {
         }
       };
     },
-    endStream() {
+    endStream(finalContent) {
+      if (finalContent !== undefined && streamLine >= 0 && streamLine < chatHistory.length) {
+        const p = C + 'AI' + R + ' ';
+        chatHistory[streamLine] = p + finalContent;
+      }
       streamLine = -1;
       if (running) draw();
     },

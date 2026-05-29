@@ -296,14 +296,11 @@ async function runTUI(session, flags) {
       try {
         const result = await runPrompt(msg, session, {
           ...flags, tui: true,
-          onStream: (chunk) => { if (chunk) streamUpdater(chunk); },
-          onToolCall: async (tc) => {
-            const name = tc.function?.name || 'tool';
-            tui.addOutput(`⎿  ${name}`);
-          },
+          onStream: (chunk) => { streamUpdater(chunk); },
+          onToolCall: async () => {},
         });
-        tui.endStream();
-        // If streaming already showed the content, don't duplicate
+        const lastMsg = result.messages.filter(m => m.role === 'assistant').pop();
+        tui.endStream(lastMsg?.content);
       } catch (e) {
         tui.endStream();
         tui.addChatLine(Rr + 'Error: ' + e.message + R);
