@@ -48,15 +48,14 @@ async function runPrompt(prompt, session, opts) {
   const hints = loadProjectHints(session.cwd);
   session.messages.push({ role: 'user', content: prompt });
 
-  // In TUI mode, don't write to stdout (corrupts TUI display)
-  const isTUI = !!opts.tui;
-  const onStream = isTUI ? undefined : (chunk) => { if (chunk) process.stdout.write(chunk); };
-  const onToolCall = isTUI ? undefined : async (tc) => {
+  // If caller provides onStream (e.g. TUI streaming), use it
+  const onStream = opts.onStream || (opts.tui ? undefined : (chunk) => { if (chunk) process.stdout.write(chunk); });
+  const onToolCall = opts.onToolCall || (opts.tui ? undefined : async (tc) => {
     const name = tc.function?.name || 'tool';
     let desc = '';
     try { const a = JSON.parse(tc.function?.arguments || '{}'); desc = a.description || a.command || a.path || ''; } catch {}
     process.stdout.write(`\n${D}⎿  ${name}${desc ? ': ' + desc : ''}${R}\n`);
-  };
+  });
 
   const result = await run({
     provider, model, apiKey, baseUrl,
@@ -183,8 +182,10 @@ export async function cli(argv) {
 
   if (cmd === 'serve' || cmd === 'web') {
     const { startWeb } = await import('./web.js');
-    const port = parseInt(argv[argv.indexOf('--port') + 1] || rest[0] || '3000', 10);
-    const host = argv.includes('--hostname') ? argv[argv.indexOf('--hostname') + 1] : '0.0.0.0';
+    const portIdx = argv.indexOf('--port');
+    const port = parseInt(portIdx >= 0 ? argv[portIdx + 1] : (rest[0] || '3000'), 10);
+    const hostIdx = argv.indexOf('--hostname');
+    const host = hostIdx >= 0 ? argv[hostIdx + 1] : '0.0.0.0';
     await startWeb(port, host);
     return;
   }
@@ -291,16 +292,23 @@ async function runTUI(session, flags) {
     autoPrompt: true,
     onMessage: async (msg) => {
       tui.addMessage('user', msg);
+      const streamUpdater = tui.startStream('assistant');
       try {
-        const result = await runPrompt(msg, session, { ...flags, tui });
-        for (const m of result.messages.slice(-1)) {
-          if (m.content && m.content !== '_empty_') tui.addMessage('assistant', m.content);
-        }
+        const result = await runPrompt(msg, session, {
+          ...flags, tui: true,
+          onStream: (chunk) => { if (chunk) streamUpdater(chunk); },
+          onToolCall: async (tc) => {
+            const name = tc.function?.name || 'tool';
+            tui.addOutput(`⎿  ${name}`);
+          },
+        });
+        tui.endStream();
+        // If streaming already showed the content, don't duplicate
       } catch (e) {
+        tui.endStream();
         tui.addChatLine(Rr + 'Error: ' + e.message + R);
       }
     },
   });
-  // Just keep running - TUI takes over stdin
   await new Promise(() => {});
 }

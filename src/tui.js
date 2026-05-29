@@ -17,9 +17,12 @@ let inputCur = 0;
 let hist = [];
 let histIdx = 0;
 let statusText = '';
+let statusColor = D;
 let msgCallback = null;
 let intCallback = null;
 let running = true;
+let streamLine = -1;
+let streamText = '';
 
 function sz() { try { rows = stdout.rows || 24; cols = stdout.columns || 80; } catch {} }
 
@@ -91,9 +94,41 @@ export function startTUI(opts = {}) {
       if (!content) return;
       for (const l of content.split('\n')) addChatLine(D + l + R);
     },
-    setStatus(s) { statusText = s; if (running) draw(); },
+    setStatus(s) { statusText = s; statusColor = D; if (running) draw(); },
     addChatLine,
     inputActive(v) { if (!v && running) draw(); },
+
+    startStream(role) {
+      const p = role === 'assistant' ? (C + 'AI' + R) : (G + 'You' + R);
+      streamLine = chatHistory.length;
+      streamText = '';
+      chatHistory.push(p + ' ');
+      if (running) draw();
+      return (chunk) => {
+        if (chunk === null) return; // null = done, handled by endStream
+        streamText += chunk;
+        chatHistory[streamLine] = (p + ' ' + streamText).slice(0, cols * 4);
+        if (running) {
+          // Redraw just the stream line for performance
+          const cr = chatRows();
+          const start = Math.max(0, chatHistory.length - cr - scrollPos);
+          const lineIdx = streamLine - start;
+          if (lineIdx >= 0 && lineIdx < cr) {
+            pos(lineIdx, 0); clr();
+            w(chatHistory[streamLine].slice(0, cols - 1));
+            // Restore cursor to input
+            const iy = rows - 3;
+            pos(iy, 2 + inputCur);
+          } else {
+            draw();
+          }
+        }
+      };
+    },
+    endStream() {
+      streamLine = -1;
+      if (running) draw();
+    },
   };
   return api;
 }
