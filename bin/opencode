@@ -1,7 +1,3 @@
 #!/bin/sh
-SCR="$(cd "$(dirname "$0")" && pwd)"
-if [ -L "$0" ]; then
-  TGT="$(readlink "$0")"
-  case "$TGT" in /*) SCR="$(dirname "$TGT")" ;; *) SCR="$(cd "$(dirname "$0")/$TGT" && pwd)" ;; esac
-fi
-exec node "$SCR/opencode.js" "$@"
+SCRIPT="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+exec node "$(dirname "$SCRIPT")/opencode.js" "$@"
